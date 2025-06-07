@@ -246,12 +246,48 @@ override_whitelisted_methods={
 # }
 
 fixtures = [
-    "Custom Field",
-    "Property Setter",
-    "Role",
-    "User Permission",
-    "DocType",
-    "Workflow",
-    "Workflow State",
-    "Workflow Action"
+    {
+        "dt": "Custom Field",
+        "filters": [
+            ["dt", "in", ["Faithful Profile", "Household", "Mosque", "Payment Entry", "Payment Entry Reference", "Payment Entry Deduction"]]
+        ]
+    },
+    {
+        "dt": "Property Setter",
+        "filters": [
+            ["doc_type", "in", ["Faithful Profile", "Household", "Mosque", "Payment Entry", "Payment Entry Reference", "Payment Entry Deduction"]]
+        ]
+    },
+    {
+        "dt": "Role",
+        "filters": [
+            ["name", "in", ["Your Custom Role 1", "Your Custom Role 2"]]
+        ]
+    },
+    {
+        "dt": "User Permission",
+        "filters": [
+            ["user", "=", "your_user@example.com"]
+        ]
+    },
+    {
+        "dt": "Workflow",
+        "filters": [
+            ["document_type", "in", ["Faithful Profile", "Household"]]
+        ]
+    },
+    {
+        "dt": "Workflow State",
+        "filters": [
+            ["workflow_state_name", "in", ["Your Custom State 1", "Your Custom State 2"]]
+        ]
+    },
+    {
+        "dt": "Workflow Action",
+        "filters": [
+            ["name", "in", ["Your Custom Action 1", "Your Custom Action 2"]]
+        ]
+    }
 ]
+
+
