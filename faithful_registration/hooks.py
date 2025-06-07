@@ -242,3 +242,13 @@ app_license = "agpl-3.0"
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
+fixtures = [
+    "Custom Field",
+    "Property Setter",
+    "Role",
+    "User Permission",
+    "DocType",
+    "Workflow",
+    "Workflow State",
+    "Workflow Action"
+]
