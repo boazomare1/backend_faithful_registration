@@ -177,6 +177,9 @@ app_license = "agpl-3.0"
 # override_whitelisted_methods = {
 # 	"frappe.desk.doctype.event.event.get_events": "faithful_registration.event.get_events"
 # }
+override_whitelisted_methods={
+    
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
