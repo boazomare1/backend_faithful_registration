@@ -1,38 +1,229 @@
 import frappe
 from frappe import _
-from frappe.utils import now
+from frappe.utils import now, random_string
 import uuid
 from werkzeug.wrappers import Response
 import json
+import frappe
+import pandas as pd
+import tempfile
+from frappe.utils.file_manager import save_file
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def bulk_upload_faithfuls():
+    request_id = str(uuid.uuid4())
+    timestamp = now()
+    created = 0
+    duplicates = 0
+    failed = 0
+
+    skipped_duplicates = []
+    failed_rows = []
+    failed_file_url = None
+
+    try:
+        # Load uploaded file
+        file = frappe.request.files.get("file")
+        if not file:
+            raise frappe.ValidationError("No file uploaded under 'file' key")
+
+        # Read Excel content
+        df = pd.read_excel(file)
+        required_fields = ["full_name", "email"]
+
+        for idx, row in df.iterrows():
+            try:
+                payload = row.to_dict()
+
+                email = payload.get("email")
+                full_name = payload.get("full_name")
+
+                if not email or not full_name:
+                    raise ValueError("Missing email or full_name")
+
+                user_email = email.strip().lower()
+                if frappe.db.exists("User", user_email):
+                    duplicates += 1
+                    skipped_duplicates.append({"row": idx + 2, "email": user_email, "reason": "Duplicate user"})
+                    continue
+
+                # Create Faithful Profile
+                faithful_doc = frappe.new_doc("Faithful Profile")
+                faithful_doc.update(payload)
+                faithful_doc.insert(ignore_permissions=True)
+
+                # Create User
+                temp_password = random_string(12)
+                user_doc = frappe.get_doc({
+                    "doctype": "User",
+                    "email": user_email,
+                    "first_name": full_name,
+                    "enabled": 1
+                })
+                user_doc.new_password = temp_password
+                user_doc.flags.ignore_password_reset_email = True
+                user_doc.insert(ignore_permissions=True)
+                user_doc.add_roles("Customer")
+
+                try:
+                    user_doc.reset_password()
+                except Exception:
+                    frappe.log_error(frappe.get_traceback(), f"Failed to send reset password email for {user_email}")
+
+                created += 1
+
+            except Exception as e:
+                failed += 1
+                failed_rows.append({
+                    "row": idx + 2,  # +2 for 1-based Excel index with header
+                    "email": payload.get("email"),
+                    "full_name": payload.get("full_name"),
+                    "error": str(e)
+                })
+
+        # Generate Excel file with failed rows
+        if failed_rows:
+            df_failed = pd.DataFrame(failed_rows)
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                df_failed.to_excel(tmp.name, index=False)
+                tmp.seek(0)
+                # saved_file = save_file(
+                #     fname="Failed_Faithful_Uploads.xlsx",
+                #     content=tmp.read(),
+                #     dt=None,
+                #     folder="Home/Attachments",
+                #     is_private=1
+                # )
+                # failed_file_url = saved_file.file_url
+
+        response = {
+            "data": {
+                "summary": {
+                    "total_uploaded": len(df),
+                    "created": created,
+                    "duplicates_skipped": duplicates,
+                    "failed": failed
+                },
+                "skipped_duplicates": skipped_duplicates,
+                "failed_rows": failed_rows,
+                "failed_file_url": failed_file_url
+            },
+            "status": "success",
+            "message": f"{created} profiles created. {duplicates} duplicates skipped. {failed} failed."
+        }
+
+        return Response(json.dumps(response), status=200, content_type="application/json")
+
+    except frappe.ValidationError as ve:
+        error = {
+            "data": None,
+            "status": "error",
+            "code": 400,
+            "message": "Validation failed during file upload.",
+            "errors": {"description": str(ve)},
+            "meta": {"request_id": request_id, "timestamp": timestamp}
+        }
+        return Response(json.dumps(error), status=400, content_type="application/json")
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Bulk Upload Failed")
+        error = {
+            "data": None,
+            "status": "error",
+            "code": 500,
+            "message": "Failed to process bulk upload.",
+            "errors": {"description": str(e)},
+            "meta": {"request_id": request_id, "timestamp": timestamp}
+        }
+        return Response(json.dumps(error), status=500, content_type="application/json")
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
 def register_faithful():
-    """Create a new Faithful Profile via API"""
-
     request_id = str(uuid.uuid4())
     timestamp = now()
 
     try:
-        # Parse JSON payload
+        # 1) Parse JSON payload
         data = frappe.local.request.get_json()
         if not data or "data" not in data:
             raise frappe.ValidationError("Missing 'data' object in payload.")
 
         payload = data["data"]
 
-        doc = frappe.new_doc("Faithful Profile")
-        doc.update(payload)
-        doc.insert(ignore_permissions=True)
+        # 1.a) Check required fields for Faithful Profile
+        email = payload.get("email")
+        full_name = payload.get("full_name")
+        if not email:
+            raise frappe.ValidationError("Missing required field: 'email'")
+        if not full_name:
+            raise frappe.ValidationError("Missing required field: 'full_name'")
 
-        # Convert dates safely
+        # 2) Create the Faithful Profile document
+        faithful_doc = frappe.new_doc("Faithful Profile")
+        faithful_doc.update(payload)
+        faithful_doc.insert(ignore_permissions=True)
+
+        # 2.a) Fetch linked names for “mosque” and “household”
+        mosque_name = None
+        household_name = None
+
+        if faithful_doc.mosque:
+            mosque_name = frappe.db.get_value("Mosque", faithful_doc.mosque, "mosque_name") \
+                          or faithful_doc.mosque
+
+        if faithful_doc.household:
+            household_name = frappe.db.get_value("Household", faithful_doc.household, "household_name") \
+                             or faithful_doc.household
+
+        # 3) Create a new User account (if one does not already exist)
+        user_email = email.strip().lower()
+        if frappe.db.exists("User", user_email):
+            raise frappe.DuplicateEntryError(f"User with email {user_email} already exists.")
+
+        # 3.a) Generate a random temp password (we won’t email this directly)
+        temp_password = random_string(12)
+
+        # 3.b) Build User doc
+        user_doc = frappe.get_doc({
+            "doctype": "User",
+            "email": user_email,
+            "first_name": full_name,
+            "enabled": 1
+        })
+        user_doc.insert(ignore_permissions=True)
+
+        # 3.c) Set the password (Frappe expects new_password on the User before save)
+        user_doc.new_password = temp_password
+        # Prevent Frappe from auto-sending the reset-password email here
+        user_doc.flags.ignore_password_reset_email = True
+        user_doc.save(ignore_permissions=True)
+
+        # 4) Assign default Role "Faithful User" to the User
+        user_doc.add_roles("Faithful User")
+
+        # 5) Trigger Frappe’s built-in reset-password email
+        try:
+            user_doc.reset_password()
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "Failed to send Reset Password email")
+
+        # 6) Build response payload
         def safe_date(val):
             return val.isoformat() if hasattr(val, "isoformat") else val
 
+        response_data = {
+            "mosque_name": mosque_name,
+            "household_name": household_name,
+            **{k: safe_date(v) for k, v in faithful_doc.as_dict().items()},
+            "user_created": user_email
+        }
+
         response = {
-            "data": {**{k: safe_date(v) for k, v in doc.as_dict().items()}},
+            "data": response_data,
             "status": "success",
             "code": 201,
-            "message": "Faithful profile registered successfully.",
+            "message": "Faithful profile registered and user account created. Check email to set password.",
             "meta": {
                 "request_id": request_id,
                 "timestamp": timestamp
@@ -41,15 +232,15 @@ def register_faithful():
 
         return Response(json.dumps(response), status=201, content_type="application/json")
 
-    except frappe.DuplicateEntryError:
-        frappe.log_error(frappe.get_traceback(), "Duplicate Faithful Registration")
+    except frappe.DuplicateEntryError as dup_err:
+        frappe.log_error(frappe.get_traceback(), "Duplicate Faithful/User Registration")
         error = {
             "data": None,
             "status": "error",
             "code": 409,
-            "message": "Duplicate entry error.",
+            "message": _("Duplicate entry: ") + str(dup_err),
             "errors": {
-                "description": "A record with the same user ID or national ID already exists."
+                "description": str(dup_err)
             },
             "meta": {
                 "request_id": request_id,
@@ -59,6 +250,7 @@ def register_faithful():
         return Response(json.dumps(error), status=409, content_type="application/json")
 
     except frappe.ValidationError as e:
+        frappe.log_error(frappe.get_traceback(), "Validation Failed during Faithful Registration")
         error = {
             "data": None,
             "status": "error",
@@ -75,12 +267,12 @@ def register_faithful():
         return Response(json.dumps(error), status=400, content_type="application/json")
 
     except Exception as e:
-        frappe.log_error(frappe.get_traceback(), "Faithful Registration Failed")
+        frappe.log_error(frappe.get_traceback(), "Faithful Registration & User Creation Failed")
         error = {
             "data": None,
             "status": "error",
             "code": 400,
-            "message": "Failed to register faithful profile.",
+            "message": "Failed to register faithful profile and create user.",
             "errors": {
                 "description": str(e)
             },
@@ -90,6 +282,7 @@ def register_faithful():
             }
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
+
 @frappe.whitelist(allow_guest=True)
 def get_all_faithfuls():
     request_id = str(uuid.uuid4())
