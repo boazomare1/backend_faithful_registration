@@ -3,9 +3,125 @@ from frappe.utils import now
 import uuid
 from werkzeug.wrappers import Response
 import json
-
+import frappe
+from frappe import _
+import pandas as pd
+from io import BytesIO
 def safe_date(val):
     return val.isoformat() if hasattr(val, "isoformat") else val
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def bulk_register_mosques():
+    """
+    Upload an Excel file to register multiple mosques in bulk.
+    Each row must contain at least the 'mosque_name'.
+    """
+
+    request_id = str(uuid.uuid4())
+    timestamp = now()
+
+    try:
+        # Step 1: Receive the uploaded file
+        file = frappe.request.files.get("file")
+        if not file:
+            raise frappe.ValidationError("No file uploaded. Expecting an Excel file.")
+
+        df = pd.read_excel(BytesIO(file.read()))
+        if "mosque_name" not in df.columns:
+            raise frappe.ValidationError("Missing required column: 'mosque_name'")
+
+        total_records = len(df)
+        created = 0
+        duplicates = 0
+        failed = 0
+        failed_records = []
+
+        for i, row in df.iterrows():
+            try:
+                mosque_name = str(row.get("mosque_name")).strip()
+
+                if not mosque_name:
+                    raise frappe.ValidationError("Mosque name is required.")
+
+                # Check for duplicates
+                if frappe.db.exists("Mosque", {"mosque_name": mosque_name}):
+                    duplicates += 1
+                    failed_records.append({
+                        "mosque_name": mosque_name,
+                        "error": "Duplicate mosque name"
+                    })
+                    continue
+
+                doc = frappe.new_doc("Mosque")
+                for col in df.columns:
+                    value = row.get(col)
+                    if pd.notna(value):
+                        doc.set(col, value)
+                doc.insert(ignore_permissions=True)
+                created += 1
+
+            except Exception as e:
+                failed += 1
+                failed_records.append({
+                    "mosque_name": row.get("mosque_name", "Unknown"),
+                    "error": str(e)
+                })
+                frappe.log_error(frappe.get_traceback(), "Bulk Mosque Upload Error")
+
+        # Prepare failed record export (if needed)
+        failed_file_url = None
+        if failed_records:
+            failed_df = pd.DataFrame(failed_records)
+            output = BytesIO()
+            failed_df.to_excel(output, index=False)
+            output.seek(0)
+
+            # Save as private file in Frappe
+            file_doc = frappe.get_doc({
+                "doctype": "File",
+                "file_name": f"failed_mosques_{timestamp}.xlsx",
+                "is_private": 1,
+                "content": output.read()
+            })
+            file_doc.save(ignore_permissions=True)
+            failed_file_url = file_doc.file_url
+
+        response = {
+            "data": {
+                "total": total_records,
+                "created": created,
+                "duplicates": duplicates,
+                "failed": failed,
+                "failed_file_url": failed_file_url
+            },
+            "status": "success",
+            "code": 200,
+            "message": f"Processed {total_records} records. Created: {created}, Duplicates: {duplicates}, Failed: {failed}.",
+            "meta": {
+                "request_id": request_id,
+                "timestamp": timestamp
+            }
+        }
+
+        return Response(json.dumps(response), status=200, content_type="application/json")
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Bulk Register Mosques Failed")
+
+        error = {
+            "data": None,
+            "status": "error",
+            "code": 500,
+            "message": "Bulk mosque upload failed.",
+            "errors": {
+                "description": str(e)
+            },
+            "meta": {
+                "request_id": request_id,
+                "timestamp": timestamp
+            }
+        }
+        return Response(json.dumps(error), status=500, content_type="application/json")
 
 @frappe.whitelist(allow_guest=True)
 def register_mosque():

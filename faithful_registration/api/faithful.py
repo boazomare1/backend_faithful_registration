@@ -8,6 +8,13 @@ import frappe
 import pandas as pd
 import tempfile
 from frappe.utils.file_manager import save_file
+@frappe.whitelist(allow_guest=True)
+def get_faithfuls_by_mosque(mosque_id):
+    return frappe.get_all("Faithful Profile", filters={"mosque": mosque_id}, fields=["name", "full_name", "phone", "email","household"])
+
+@frappe.whitelist(allow_guest=True)
+def get_faithfuls_by_household(household_id):
+    return frappe.get_all("Faithful Profile", filters={"household": household_id}, fields=["name", "full_name", "phone", "email","mosque"])
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def bulk_upload_faithfuls():
@@ -283,14 +290,19 @@ def register_faithful():
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist(allow_guest=True, methods=["GET", "POST"])
 def get_all_faithfuls():
     request_id = str(uuid.uuid4())
     timestamp = now()
 
     try:
+        # Extract filters from request args and remove non-model fields like 'cmd'
+        raw_filters = dict(frappe.local.form_dict)
+        filters = {k: v for k, v in raw_filters.items() if k not in ["cmd", "data"] and v}
+
         records = frappe.get_all(
             "Faithful Profile",
+            filters=filters or None,
             fields=[
                 "name", "full_name", "user_id", "phone", "gender", "mosque",
                 "national_id_number", "marital_status", "occupation", "creation"
@@ -298,9 +310,10 @@ def get_all_faithfuls():
             order_by="creation desc"
         )
 
-        # Optional: ISO format for date
+        # Format creation dates
         for r in records:
-            r["creation"] = r["creation"].isoformat() if hasattr(r["creation"], "isoformat") else r["creation"]
+            if hasattr(r["creation"], "isoformat"):
+                r["creation"] = r["creation"].isoformat()
 
         response = {
             "data": records,
@@ -309,7 +322,8 @@ def get_all_faithfuls():
             "message": "Faithful profiles retrieved successfully.",
             "meta": {
                 "request_id": request_id,
-                "timestamp": timestamp
+                "timestamp": timestamp,
+                "filters_applied": filters
             }
         }
         return Response(json.dumps(response), status=200, content_type="application/json")
@@ -325,11 +339,13 @@ def get_all_faithfuls():
                 "description": str(e)
             },
             "meta": {
+                "filters_applied": raw_filters,
                 "request_id": request_id,
                 "timestamp": timestamp
             }
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
+
 
 @frappe.whitelist(allow_guest=True)
 def get_faithful(name):
@@ -546,3 +562,216 @@ def update_faithful():
             }
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def reassign_faithful(data=None):
+    request_id = str(uuid.uuid4())
+    timestamp = now()
+
+    try:
+        if not data:
+            data = frappe.form_dict.get("data")
+
+        if isinstance(data, str):
+            data = frappe.parse_json(data)
+
+        data = frappe._dict(data)
+
+        # Validate inputs
+        if not data.get("new_mosque") and not data.get("new_household"):
+            return Response(json.dumps({
+                "data": None,
+                "status": "error",
+                "code": 400,
+                "message": "Missing both new_mosque and new_household.",
+                "errors": {
+                    "description": "You must provide at least a new mosque or a new household."
+                },
+                "meta": {
+                    "request_id": request_id,
+                    "timestamp": timestamp
+                }
+            }), status=400, content_type="application/json")
+
+        faithful = frappe.get_doc("Faithful Profile", data.faithful_id)
+
+        old_mosque = faithful.mosque
+        old_household = faithful.household
+
+        if data.get("new_mosque"):
+            faithful.mosque = data.new_mosque
+
+        if data.get("new_household"):
+            faithful.household = data.new_household
+
+        faithful.save(ignore_permissions=True)
+
+        # Log movement
+        frappe.get_doc({
+            "doctype": "Faithful Movement Log",
+            "faithful": faithful.name,
+            "previous_mosque": old_mosque,
+            "new_mosque": data.get("new_mosque", old_mosque),
+            "previous_household": old_household,
+            "new_household": data.get("new_household", old_household),
+            "reason": data.reason,
+            "moved_by": frappe.session.user,
+            "timestamp": now()
+        }).insert(ignore_permissions=True)
+
+        updated_profile = faithful.as_dict()
+
+        # Add linked doc names
+        if faithful.mosque:
+            updated_profile["mosque_info"] = {
+                "name": faithful.mosque,
+                "display_name": frappe.db.get_value("Mosque", faithful.mosque, "mosque_name")
+            }
+
+        if faithful.household:
+            updated_profile["household_info"] = {
+                "name": faithful.household,
+                "display_name": frappe.db.get_value("Household", faithful.household, "household_name")
+            }
+
+        return Response(
+            frappe.as_json({
+                "data": updated_profile,
+                "status": "success",
+                "code": 200,
+                "message": "Faithful reassigned successfully.",
+                "meta": {
+                    "request_id": request_id,
+                    "timestamp": timestamp
+                }
+            }),
+            status=200,
+            content_type="application/json"
+        )
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Reassign Faithful Failed")
+        return Response(json.dumps({
+            "data": None,
+            "status": "error",
+            "code": 500,
+            "message": "Failed to reassign faithful.",
+            "errors": {
+                "description": str(e)
+            },
+            "meta": {
+                "request_id": request_id,
+                "timestamp": timestamp
+            }
+        }), status=500, content_type="application/json")
+
+    request_id = str(uuid.uuid4())
+    timestamp = now()
+
+    try:
+        if not data:
+            data = frappe.form_dict.get("data")
+        if isinstance(data, str):
+            data = frappe.parse_json(data)
+        data = frappe._dict(data)
+
+        if not data.get("faithful_id"):
+            return Response(json.dumps({
+                "data": None,
+                "status": "error",
+                "code": 400,
+                "message": "Missing required field: faithful_id",
+                "errors": {
+                    "description": "faithful_id is required to perform unassignment."
+                },
+                "meta": {
+                    "request_id": request_id,
+                    "timestamp": timestamp
+                }
+            }), status=400, content_type="application/json")
+        frappe.set_user("Administrator")
+        faithful = frappe.get_doc("Faithful Profile", data.faithful_id)
+        faithful.flags.ignore_permissions = True
+
+        updated = False
+        logs = []
+
+        if data.get("mosque_id") and faithful.mosque == data.mosque_id:
+            logs.append({
+                "previous_mosque": faithful.mosque,
+                "new_mosque": None,
+                "previous_household": None,
+                "new_household": None,
+                "reason": data.get("reason", "Unassigned from mosque")
+            })
+            faithful.mosque = None
+            updated = True
+
+        if data.get("household_id") and faithful.household == data.household_id:
+            logs.append({
+                "previous_mosque": None,
+                "new_mosque": None,
+                "previous_household": faithful.household,
+                "new_household": None,
+                "reason": data.get("reason", "Unassigned from household")
+            })
+            faithful.household = None
+            updated = True
+
+        if not updated:
+            return Response(json.dumps({
+                "data": None,
+                "status": "error",
+                "code": 400,
+                "message": "No matching household or mosque to unassign.",
+                "errors": {
+                    "description": "The faithful is not assigned to the specified household or mosque."
+                },
+                "meta": {
+                    "request_id": request_id,
+                    "timestamp": timestamp
+                }
+            }), status=400, content_type="application/json")
+
+        faithful.save(ignore_permissions=True)
+
+        # Create movement logs for each unassignment
+        for log in logs:
+            frappe.get_doc({
+                "doctype": "Faithful Movement Log",
+                "faithful": faithful.name,
+                "previous_mosque": log["previous_mosque"],
+                "new_mosque": log["new_mosque"],
+                "previous_household": log["previous_household"],
+                "new_household": log["new_household"],
+                "reason": log["reason"],
+                "moved_by": frappe.session.user,
+                "timestamp": now()
+            }).insert(ignore_permissions=True)
+
+        return Response(frappe.as_json({
+            "data": faithful.as_dict(),
+            "status": "success",
+            "code": 200,
+            "message": "Faithful unassigned successfully.",
+            "meta": {
+                "request_id": request_id,
+                "timestamp": timestamp
+            }
+        }), status=200, content_type="application/json")
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Unassign Faithful Failed")
+        return Response(json.dumps({
+            "data": None,
+            "status": "error",
+            "code": 500,
+            "message": "Failed to unassign faithful.",
+            "errors": {
+                "description": str(e)
+            },
+            "meta": {
+                "request_id": request_id,
+                "timestamp": timestamp
+            }
+        }), status=500, content_type="application/json")

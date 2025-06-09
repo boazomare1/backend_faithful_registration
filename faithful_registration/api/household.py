@@ -4,9 +4,113 @@ from frappe.utils import now
 import uuid
 from werkzeug.wrappers import Response
 import json
-
+import pandas as pd
+from io import BytesIO
 def safe_date(val):
     return val.isoformat() if hasattr(val, "isoformat") else val
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def bulk_register_households():
+    """Upload an Excel file to create multiple Household records in bulk."""
+
+    request_id = str(uuid.uuid4())
+    timestamp = now()
+
+    try:
+        file = frappe.request.files.get("file")
+        if not file:
+            raise frappe.ValidationError("No Excel file uploaded.")
+
+        df = pd.read_excel(BytesIO(file.read()))
+        if "household_name" not in df.columns:
+            raise frappe.ValidationError("Missing required column: 'household_name'.")
+
+        total = len(df)
+        created, duplicates, failed = 0, 0, 0
+        failed_records = []
+
+        for _, row in df.iterrows():
+            try:
+                household_name = str(row.get("household_name")).strip()
+                if not household_name:
+                    raise frappe.ValidationError("household_name is required.")
+
+                if frappe.db.exists("Household", {"household_name": household_name}):
+                    duplicates += 1
+                    failed_records.append({
+                        "household_name": household_name,
+                        "error": "Duplicate household_name"
+                    })
+                    continue
+
+                doc = frappe.new_doc("Household")
+                for col in df.columns:
+                    value = row.get(col)
+                    if pd.notna(value):
+                        doc.set(col, value)
+                doc.insert(ignore_permissions=True)
+                created += 1
+
+            except Exception as e:
+                failed += 1
+                failed_records.append({
+                    "household_name": row.get("household_name", "Unknown"),
+                    "error": str(e)
+                })
+                frappe.log_error(frappe.get_traceback(), "Bulk Household Upload Error")
+
+        failed_file_url = None
+        if failed_records:
+            failed_df = pd.DataFrame(failed_records)
+            output = BytesIO()
+            failed_df.to_excel(output, index=False)
+            output.seek(0)
+
+            file_doc = frappe.get_doc({
+                "doctype": "File",
+                "file_name": f"failed_households_{timestamp}.xlsx",
+                "is_private": 1,
+                "content": output.read()
+            })
+            file_doc.save(ignore_permissions=True)
+            failed_file_url = file_doc.file_url
+
+        response = {
+            "data": {
+                "total": total,
+                "created": created,
+                "duplicates": duplicates,
+                "failed": failed,
+                "failed_file_url": failed_file_url
+            },
+            "status": "success",
+            "code": 200,
+            "message": f"Processed {total} records. Created: {created}, Duplicates: {duplicates}, Failed: {failed}.",
+            "meta": {
+                "request_id": request_id,
+                "timestamp": timestamp
+            }
+        }
+
+        return Response(json.dumps(response), status=200, content_type="application/json")
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Bulk Household Upload Failed")
+        error = {
+            "data": None,
+            "status": "error",
+            "code": 500,
+            "message": "Bulk household upload failed.",
+            "errors": {
+                "description": str(e)
+            },
+            "meta": {
+                "request_id": request_id,
+                "timestamp": timestamp
+            }
+        }
+        return Response(json.dumps(error), status=500, content_type="application/json")
+
 
 @frappe.whitelist(allow_guest=True)
 def create_household():

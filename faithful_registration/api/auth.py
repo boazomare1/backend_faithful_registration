@@ -68,6 +68,41 @@ def verify_otp(email, otp):
     }
 
 @frappe.whitelist(allow_guest=True)
+def login_user(email, password):
+    try:
+        from frappe.auth import LoginManager
+
+        # Attempt login
+        login_manager = LoginManager()
+        login_manager.authenticate(user=email, pwd=password)
+        login_manager.post_login()
+
+        # Fetch session ID
+        sid = frappe.session.sid
+
+        return {
+            "status": "success",
+            "message": "Login successful",
+            "sid": sid,
+            "user": frappe.session.user
+        }
+
+    except frappe.AuthenticationError as e:
+        frappe.clear_messages()
+        return {
+            "status": "error",
+            "message": "Invalid email or password",
+            "error": str(e)
+        }
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "Login Failed")
+        return {
+            "status": "error",
+            "message": "Login failed due to an unexpected error.",
+            "error": str(e)
+        }
+
 @frappe.whitelist(allow_guest=True)
 def forgot_password(email):
     """
