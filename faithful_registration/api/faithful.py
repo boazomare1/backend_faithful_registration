@@ -305,15 +305,21 @@ def get_all_faithfuls():
             filters=filters or None,
             fields=[
                 "name", "full_name", "user_id", "phone", "gender", "mosque",
-                "national_id_number", "marital_status", "occupation", "creation"
+                "national_id_number", "marital_status", "occupation", "creation",
+                "household"
             ],
             order_by="creation desc"
         )
 
-        # Format creation dates
+        # Fetch household_name for each record
         for r in records:
             if hasattr(r["creation"], "isoformat"):
                 r["creation"] = r["creation"].isoformat()
+            # Add household_name if household exists
+            if r.get("household"):
+                r["household_name"] = frappe.db.get_value("Household", r["household"], "household_name") or r["household"]
+            else:
+                r["household_name"] = None
 
         response = {
             "data": records,
@@ -345,8 +351,6 @@ def get_all_faithfuls():
             }
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
-
-
 @frappe.whitelist(allow_guest=True)
 def get_faithful(name):
     request_id = str(uuid.uuid4())
