@@ -1,20 +1,22 @@
 import frappe
 from frappe import _
-from frappe.utils import now, random_string
+from frappe.utils import now, random_string, get_files_path  # Added get_files_path import
 import uuid
 from werkzeug.wrappers import Response
 import json
-import frappe
 import pandas as pd
 import tempfile
 from frappe.utils.file_manager import save_file
+import base64
+import os
+
 @frappe.whitelist(allow_guest=True)
 def get_faithfuls_by_mosque(mosque_id):
-    return frappe.get_all("Faithful Profile", filters={"mosque": mosque_id}, fields=["name", "full_name", "phone", "email","household"])
+    return frappe.get_all("Faithful Profile", filters={"mosque": mosque_id}, fields=["name", "full_name", "phone", "email", "household"])
 
 @frappe.whitelist(allow_guest=True)
 def get_faithfuls_by_household(household_id):
-    return frappe.get_all("Faithful Profile", filters={"household": household_id}, fields=["name", "full_name", "phone", "email","mosque"])
+    return frappe.get_all("Faithful Profile", filters={"household": household_id}, fields=["name", "full_name", "phone", "email", "mosque"])
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def bulk_upload_faithfuls():
@@ -144,7 +146,6 @@ def bulk_upload_faithfuls():
         }
         return Response(json.dumps(error), status=500, content_type="application/json")
 
-
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def register_faithful():
     request_id = str(uuid.uuid4())
@@ -168,10 +169,46 @@ def register_faithful():
 
         # 2) Create the Faithful Profile document
         faithful_doc = frappe.new_doc("Faithful Profile")
+        # Remove file fields from payload to handle separately
+        file_fields = ['profile_image', 'national_id_document', 'special_needs_proof']
+        file_payloads = {k: payload.pop(k, None) for k in file_fields}
         faithful_doc.update(payload)
         faithful_doc.insert(ignore_permissions=True)
 
-        # 2.a) Fetch linked names for “mosque” and “household”
+        # 2.a) Handle Base64 file uploads
+        if file_payloads['profile_image']:
+            file_url = save_base64_file(
+                base64_data=file_payloads['profile_image'],
+                file_name=f"{full_name}_profile_image.png",
+                attached_to_doctype="Faithful Profile",
+                attached_to_name=faithful_doc.name,
+                is_private=0
+            )
+            faithful_doc.profile_image = file_url
+
+        if file_payloads['national_id_document']:
+            file_url = save_base64_file(
+                base64_data=file_payloads['national_id_document'],
+                file_name=f"{full_name}_national_id.png",
+                attached_to_doctype="Faithful Profile",
+                attached_to_name=faithful_doc.name,
+                is_private=1
+            )
+            faithful_doc.national_id_document = file_url
+
+        if file_payloads['special_needs_proof'] and payload.get('special_needs') == 'Yes':
+            file_url = save_base64_file(
+                base64_data=file_payloads['special_needs_proof'],
+                file_name=f"{full_name}_special_needs_proof.png",
+                attached_to_doctype="Faithful Profile",
+                attached_to_name=faithful_doc.name,
+                is_private=1
+            )
+            faithful_doc.special_needs_proof = file_url
+
+        faithful_doc.save(ignore_permissions=True)
+
+        # 2.b) Fetch linked names for “mosque” and “household”
         mosque_name = None
         household_name = None
 
@@ -188,7 +225,7 @@ def register_faithful():
         if frappe.db.exists("User", user_email):
             raise frappe.DuplicateEntryError(f"User with email {user_email} already exists.")
 
-        # 3.a) Generate a random temp password (we won’t email this directly)
+        # 3.a) Generate a random temp password
         temp_password = random_string(12)
 
         # 3.b) Build User doc
@@ -200,9 +237,8 @@ def register_faithful():
         })
         user_doc.insert(ignore_permissions=True)
 
-        # 3.c) Set the password (Frappe expects new_password on the User before save)
+        # 3.c) Set the password
         user_doc.new_password = temp_password
-        # Prevent Frappe from auto-sending the reset-password email here
         user_doc.flags.ignore_password_reset_email = True
         user_doc.save(ignore_permissions=True)
 
@@ -351,6 +387,7 @@ def get_all_faithfuls():
             }
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
+
 @frappe.whitelist(allow_guest=True)
 def get_faithful(name):
     request_id = str(uuid.uuid4())
@@ -409,7 +446,6 @@ def get_faithful(name):
             }
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
-
 
 @frappe.whitelist(allow_guest=True)
 def delete_faithful(name=None, user_id=None):
@@ -480,8 +516,6 @@ def delete_faithful(name=None, user_id=None):
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def update_faithful():
-    """Update a Faithful Profile using full payload format"""
-
     request_id = str(uuid.uuid4())
     timestamp = now()
 
@@ -498,7 +532,47 @@ def update_faithful():
             raise frappe.ValidationError("Missing 'name' field in data for update.")
 
         doc = frappe.get_doc("Faithful Profile", name)
+
+        # Handle file fields separately
+        file_fields = ['profile_image', 'national_id_document', 'special_needs_proof']
+        file_payloads = {k: payload.pop(k, None) for k in file_fields}
+
+        # Update other fields
         doc.update(payload)
+
+        # Handle Base64 file uploads
+        if file_payloads['profile_image']:
+            file_url = save_base64_file(
+                base64_data=file_payloads['profile_image'],
+                file_name=f"{doc.full_name}_profile_image.png",
+                attached_to_doctype="Faithful Profile",
+                attached_to_name=doc.name,
+                is_private=0
+            )
+            doc.profile_image = file_url
+
+        if file_payloads['national_id_document']:
+            file_url = save_base64_file(
+                base64_data=file_payloads['national_id_document'],
+                file_name=f"{doc.full_name}_national_id.png",
+                attached_to_doctype="Faithful Profile",
+                attached_to_name=doc.name,
+                is_private=1
+            )
+            doc.national_id_document = file_url
+
+        if file_payloads['special_needs_proof'] and payload.get('special_needs') == 'Yes':
+            file_url = save_base64_file(
+                base64_data=file_payloads['special_needs_proof'],
+                file_name=f"{doc.full_name}_special_needs_proof.png",
+                attached_to_doctype="Faithful Profile",
+                attached_to_name=doc.name,
+                is_private=1
+            )
+            doc.special_needs_proof = file_url
+        elif payload.get('special_needs') != 'Yes':
+            doc.special_needs_proof = None  # Clear proof if special_needs is not "Yes"
+
         doc.save(ignore_permissions=True)
 
         # Convert dates safely
@@ -668,3 +742,53 @@ def reassign_faithful(data=None):
                 "timestamp": timestamp
             }
         }), status=500, content_type="application/json")
+
+def save_base64_file(base64_data, file_name, attached_to_doctype, attached_to_name, is_private=0):
+    try:
+        # Validate Base64 format
+        if ';base64,' not in base64_data:
+            raise frappe.ValidationError("Invalid Base64 data format")
+
+        header, base64_string = base64_data.split(';base64,')
+        mime_type = header.split(':')[1]
+        allowed_mime_types = ['image/png', 'image/jpeg', 'application/pdf']
+        if mime_type not in allowed_mime_types:
+            raise frappe.ValidationError(f"Unsupported file type: {mime_type}")
+
+        # Decode and check file size
+        file_data = base64.b64decode(base64_string)
+        max_file_size = 5 * 1024 * 1024  # 5MB limit
+        if len(file_data) > max_file_size:
+            raise frappe.ValidationError("File size exceeds 5MB limit")
+
+        # Ensure unique file name
+        base_name, ext = os.path.splitext(file_name)
+        unique_file_name = f"{base_name}_{frappe.generate_hash(length=10)}.{ext.lstrip('.') or 'png'}"
+
+        # Define file path using frappe's utility
+        folder_path = get_files_path() if not is_private else frappe.get_site_path('private', 'files')
+        file_path = os.path.join(folder_path, unique_file_name)
+
+        # Ensure the directory exists
+        os.makedirs(folder_path, exist_ok=True)
+
+        # Save file to disk
+        with open(file_path, 'wb') as f:
+            f.write(file_data)
+
+        # Create a File record
+        file_doc = frappe.get_doc({
+            'doctype': 'File',
+            'file_name': unique_file_name,
+            'file_url': f'/files/{unique_file_name}' if not is_private else f'/private/files/{unique_file_name}',
+            'is_private': is_private,
+            'content': None,
+            'attached_to_doctype': attached_to_doctype,
+            'attached_to_name': attached_to_name
+        })
+        file_doc.insert(ignore_permissions=True)
+
+        return file_doc.file_url
+    except Exception as e:
+        frappe.log_error(f"Error saving Base64 file: {str(e)}")
+        raise frappe.ValidationError(f"Failed to save file: {str(e)}")
