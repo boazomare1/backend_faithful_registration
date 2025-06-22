@@ -1,5 +1,5 @@
 import frappe
-from frappe.utils import now
+from frappe.utils import now,get_files_path
 import uuid
 from werkzeug.wrappers import Response
 import json
@@ -7,6 +7,7 @@ import frappe
 from frappe import _
 import pandas as pd
 from io import BytesIO
+import base64, re, os
 def safe_date(val):
     return val.isoformat() if hasattr(val, "isoformat") else val
 
@@ -39,11 +40,13 @@ def bulk_register_mosques():
         for i, row in df.iterrows():
             try:
                 mosque_name = str(row.get("mosque_name")).strip()
-
                 if not mosque_name:
                     raise frappe.ValidationError("Mosque name is required.")
 
-                # Check for duplicates
+                email = str(row.get("contact_email")).strip() if pd.notna(row.get("contact_email")) else None
+                phone = str(row.get("contact_phone")).strip() if pd.notna(row.get("contact_phone")) else None
+
+                # Check for duplicates by name
                 if frappe.db.exists("Mosque", {"mosque_name": mosque_name}):
                     duplicates += 1
                     failed_records.append({
@@ -52,11 +55,31 @@ def bulk_register_mosques():
                     })
                     continue
 
+                # Check for duplicates by email
+                if email and frappe.db.exists("Mosque", {"contact_email": email}):
+                    duplicates += 1
+                    failed_records.append({
+                        "mosque_name": mosque_name,
+                        "error": f"Duplicate contact email: {email}"
+                    })
+                    continue
+
+                # Check for duplicates by phone
+                if phone and frappe.db.exists("Mosque", {"contact_phone": phone}):
+                    duplicates += 1
+                    failed_records.append({
+                        "mosque_name": mosque_name,
+                        "error": f"Duplicate contact phone: {phone}"
+                    })
+                    continue
+
+                # Create document
                 doc = frappe.new_doc("Mosque")
                 for col in df.columns:
                     value = row.get(col)
                     if pd.notna(value):
                         doc.set(col, value)
+
                 doc.insert(ignore_permissions=True)
                 created += 1
 
@@ -136,9 +159,25 @@ def register_mosque():
         
         payload = data["data"]
 
-        # Ensure mandatory field
+        # Mandatory field check
         if not payload.get("mosque_name"):
             raise frappe.ValidationError("Field 'mosque_name' is mandatory.")
+
+        email = payload.get("contact_email")
+        phone = payload.get("contact_phone")
+
+        if email and frappe.db.exists("Mosque", {"contact_email": email}):
+            raise frappe.ValidationError(f"Email `{email}` is already in use.")
+
+        if phone and frappe.db.exists("Mosque", {"contact_phone": phone}):
+            raise frappe.ValidationError(f"Phone `{phone}` is already in use.")
+
+        # Handle base64 images
+        for field in ["front_image", "back_image", "madrasa_image", "inside_image", "ceiling_image", "minbar_image"]:
+            img = payload.get(field)
+            if img and img.startswith("data:"):
+                filename = f"{field}_{uuid.uuid4().hex}.jpg"
+                payload[field] = save_base64_file(img, filename)
 
         doc = frappe.new_doc("Mosque")
         doc.update(payload)
@@ -156,39 +195,6 @@ def register_mosque():
         }
 
         return Response(json.dumps(response), status=201, content_type="application/json")
-
-    except frappe.DuplicateEntryError:
-        frappe.log_error(frappe.get_traceback(), "Duplicate Mosque Registration")
-        error = {
-            "data": None,
-            "status": "error",
-            "code": 409,
-            "message": "Duplicate entry error.",
-            "errors": {
-                "description": "A mosque with the same name already exists."
-            },
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
-        }
-        return Response(json.dumps(error), status=409, content_type="application/json")
-
-    except frappe.ValidationError as e:
-        error = {
-            "data": None,
-            "status": "error",
-            "code": 400,
-            "message": "Validation failed.",
-            "errors": {
-                "description": str(e)
-            },
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
-        }
-        return Response(json.dumps(error), status=400, content_type="application/json")
 
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Mosque Registration Failed")
@@ -226,6 +232,30 @@ def get_all_mosques():
         for r in records:
             r["date_established"] = safe_date(r["date_established"])
             r["creation"] = safe_date(r["creation"])
+
+            # Head Imam Name & Profile Image
+            if r.get("head_imam"):
+                faithful = frappe.db.get_value("Imam", r["head_imam"], "faithful")
+                if faithful:
+                    profile = frappe.db.get_value(
+                        "Faithful Profile",
+                        faithful,
+                        ["full_name", "profile_image"],
+                        as_dict=True
+                    ) or {}
+                    r["head_imam_name"] = profile.get("full_name")
+                    r["head_imam_image"] = profile.get("profile_image")
+
+            # List of Imams assigned to this mosque
+            imams = frappe.get_all(
+                "Imam",
+                filters={"mosque_assigned": r["name"]},
+                fields=["name", "role_in_mosque"]
+            )
+            for imam in imams:
+                faithful = frappe.db.get_value("Imam", imam["name"], "faithful")
+                imam["imam_name"] = frappe.db.get_value("Faithful Profile", faithful, "full_name")
+            r["imams"] = imams
 
         response = {
             "data": records,
@@ -270,6 +300,30 @@ def get_mosque(name):
         doc_dict = doc.as_dict()
         for key, value in doc_dict.items():
             doc_dict[key] = safe_date(value)
+
+        # Head Imam Name & Profile Image
+        if doc.head_imam:
+            faithful = frappe.db.get_value("Imam", doc.head_imam, "faithful")
+            if faithful:
+                profile = frappe.db.get_value(
+                    "Faithful Profile",
+                    faithful,
+                    ["full_name", "profile_image"],
+                    as_dict=True
+                ) or {}
+                doc_dict["head_imam_name"] = profile.get("full_name")
+                doc_dict["head_imam_image"] = profile.get("profile_image")
+
+        # List of Imams assigned to this mosque
+        imams = frappe.get_all(
+            "Imam",
+            filters={"mosque_assigned": doc.name},
+            fields=["name", "role_in_mosque"]
+        )
+        for imam in imams:
+            faithful = frappe.db.get_value("Imam", imam["name"], "faithful")
+            imam["imam_name"] = frappe.db.get_value("Faithful Profile", faithful, "full_name")
+        doc_dict["imams"] = imams
 
         response = {
             "data": doc_dict,
@@ -319,7 +373,6 @@ def get_mosque(name):
 
         return Response(json.dumps(error), status=400, content_type="application/json")
 
-
 @frappe.whitelist(allow_guest=True)
 def update_mosque():
     """Update Mosque using full payload"""
@@ -337,6 +390,27 @@ def update_mosque():
             raise frappe.ValidationError("Missing 'name' field in data for update.")
 
         doc = frappe.get_doc("Mosque", name)
+
+        email = payload.get("contact_email")
+        phone = payload.get("contact_phone")
+
+        if email:
+            existing = frappe.db.get_value("Mosque", {"contact_email": email}, "name")
+            if existing and existing != name:
+                raise frappe.ValidationError(f"Email `{email}` is already in use.")
+
+        if phone:
+            existing = frappe.db.get_value("Mosque", {"contact_phone": phone}, "name")
+            if existing and existing != name:
+                raise frappe.ValidationError(f"Phone `{phone}` is already in use.")
+
+        # Handle base64 images
+        for field in ["front_image", "back_image", "madrasa_image", "inside_image", "ceiling_image", "minbar_image"]:
+            img = payload.get(field)
+            if img and img.startswith("data:"):
+                filename = f"{field}_{uuid.uuid4().hex}.jpg"
+                payload[field] = save_base64_file(img, filename)
+
         doc.update(payload)
         doc.save(ignore_permissions=True)
 
@@ -352,38 +426,6 @@ def update_mosque():
         }
 
         return Response(json.dumps(response), status=200, content_type="application/json")
-
-    except frappe.DoesNotExistError:
-        error = {
-            "data": None,
-            "status": "error",
-            "code": 404,
-            "message": "Mosque not found.",
-            "errors": {
-                "description": f"No Mosque found for name={name}"
-            },
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
-        }
-        return Response(json.dumps(error), status=404, content_type="application/json")
-
-    except frappe.ValidationError as e:
-        error = {
-            "data": None,
-            "status": "error",
-            "code": 400,
-            "message": "Failed to update mosque.",
-            "errors": {
-                "description": str(e)
-            },
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
-        }
-        return Response(json.dumps(error), status=400, content_type="application/json")
 
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Update Mosque Failed")
@@ -401,6 +443,7 @@ def update_mosque():
             }
         }
         return Response(json.dumps(error), status=400, content_type="application/json")
+
 
 @frappe.whitelist(allow_guest=True)
 def delete_mosque(name=None):
@@ -463,3 +506,31 @@ def delete_mosque(name=None):
         }
 
         return Response(json.dumps(error), status=400, content_type="application/json")
+
+def save_base64_file(data_url, filename):
+    try:
+        # Strip out the base64 header: data:image/jpeg;base64,...
+        header, encoded = data_url.split(",", 1)
+        filedata = base64.b64decode(encoded)
+
+        # Create full file path in /files/
+        filepath = os.path.join(get_files_path(), filename)
+
+        # Write the decoded image
+        with open(filepath, "wb") as f:
+            f.write(filedata)
+
+        # Create and insert the File doc
+        file_doc = frappe.get_doc({
+            "doctype": "File",
+            "file_name": filename,
+            "file_url": f"/files/{filename}",
+            "is_private": 0
+        })
+        file_doc.insert(ignore_permissions=True)
+
+        return file_doc.file_url
+
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), "save_base64_file failed")
+        raise
