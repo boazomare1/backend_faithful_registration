@@ -7,6 +7,16 @@ import uuid
 from werkzeug.wrappers import Response
 import json
 from frappe.core.doctype.user.user import reset_password
+
+# --- CORS Helper ---
+def cors_response(body, status=200):
+    response = Response(json.dumps(body), status=status, content_type="application/json")
+    response.headers["Access-Control-Allow-Origin"] = "http://localhost:8081"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+    return response
+
 @frappe.whitelist(allow_guest=True)
 def send_otp(email):
     cooldown_key = f"otp_cooldown:{email}"
@@ -59,7 +69,7 @@ def verify_otp(email, otp):
             "message": "Invalid OTP."
         }
 
-    # OTP is valid – you can now delete it and proceed with whatever follows (e.g. mark user/email as verified)
+    # OTP is valid – you can now delete it and proceed with whatever follows
     frappe.cache().delete_value(f"otp:{email}")
 
     return {
@@ -120,7 +130,7 @@ def forgot_password(email):
 
         # Check if user exists
         if not frappe.db.exists("User", user_email):
-            return Response(json.dumps({
+            return cors_response({
                 "data": None,
                 "status": "error",
                 "code": 404,
@@ -132,12 +142,12 @@ def forgot_password(email):
                     "request_id": request_id,
                     "timestamp": timestamp
                 }
-            }), status=404, content_type="application/json")
+            }, status=404)
 
         # Use built-in method to send reset email
         reset_password(user_email)
 
-        return Response(json.dumps({
+        return cors_response({
             "data": {"email": user_email},
             "status": "success",
             "code": 200,
@@ -146,11 +156,11 @@ def forgot_password(email):
                 "request_id": request_id,
                 "timestamp": timestamp
             }
-        }), status=200, content_type="application/json")
+        })
 
     except frappe.ValidationError as ve:
         frappe.log_error(frappe.get_traceback(), "Forgot Password Validation Failed")
-        return Response(json.dumps({
+        return cors_response({
             "data": None,
             "status": "error",
             "code": 400,
@@ -162,11 +172,11 @@ def forgot_password(email):
                 "request_id": request_id,
                 "timestamp": timestamp
             }
-        }), status=400, content_type="application/json")
+        }, status=400)
 
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Forgot Password Failed")
-        return Response(json.dumps({
+        return cors_response({
             "data": None,
             "status": "error",
             "code": 500,
@@ -178,88 +188,6 @@ def forgot_password(email):
                 "request_id": request_id,
                 "timestamp": timestamp
             }
-        }), status=500, content_type="application/json")
-    """
-    1) Accept an email address.
-    2) Trigger Frappe’s built-in forgot_password() to send a reset link.
-    3) Return JSON indicating success or error.
-    """
+        }, status=500)
 
-    request_id = str(uuid.uuid4())
-    timestamp = now()
-
-    try:
-        # 1) Ensure email is provided
-        if not email:
-            raise frappe.ValidationError("Missing required field: 'email'")
-
-        user_email = email.strip().lower()
-
-        # 2) Verify that a User with this email actually exists
-        if not frappe.db.exists("User", user_email):
-            response = {
-                "data": None,
-                "status": "error",
-                "code": 404,
-                "message": _("User not found."),
-                "errors": {
-                    "description": f"No user exists with email '{user_email}'."
-                },
-                "meta": {
-                    "request_id": request_id,
-                    "timestamp": timestamp
-                }
-            }
-            return Response(json.dumps(response), status=404, content_type="application/json")
-
-        # 3) Call Frappe’s built-in forgot_password
-        #    It expects frappe.local.form_dict.user to be set:
-        frappe.local.form_dict.user = user_email
-        frappe.auth.forgot_password()
-
-        # 4) Build a success response
-        response = {
-            "data": {"email": user_email},
-            "status": "success",
-            "code": 200,
-            "message": "Password reset link sent to email.",
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
-        }
-        return Response(json.dumps(response), status=200, content_type="application/json")
-
-    except frappe.ValidationError as ve:
-        frappe.log_error(frappe.get_traceback(), "Forgot Password Validation Failed")
-        error = {
-            "data": None,
-            "status": "error",
-            "code": 400,
-            "message": "Validation failed.",
-            "errors": {
-                "description": str(ve)
-            },
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
-        }
-        return Response(json.dumps(error), status=400, content_type="application/json")
-
-    except Exception as e:
-        frappe.log_error(frappe.get_traceback(), "Forgot Password Failed")
-        error = {
-            "data": None,
-            "status": "error",
-            "code": 500,
-            "message": "Failed to send password reset link.",
-            "errors": {
-                "description": str(e)
-            },
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
-        }
-        return Response(json.dumps(error), status=500, content_type="application/json")
+# The duplicated block at the end of your original script appears redundant and is now removed.
