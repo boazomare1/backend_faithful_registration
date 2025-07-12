@@ -215,38 +215,37 @@ def register_mosque():
 
 @frappe.whitelist(allow_guest=True)
 def get_all_mosques():
-    """Retrieve all Mosque records"""
+    """Retrieve all Mosque records (all fields)"""
     request_id = str(uuid.uuid4())
     timestamp = now()
 
     try:
+        # <-- pull in *all* fields -->
         records = frappe.get_all(
             "Mosque",
-            fields=[
-                "name", "mosque_name", "location", "date_established",
-                "head_imam", "total_capacity", "contact_email", "contact_phone", "creation"
-            ],
+            fields=["*"],
             order_by="creation desc"
         )
 
+        # convert dates to ISO and enrich with head_imam/imams
         for r in records:
-            r["date_established"] = safe_date(r["date_established"])
-            r["creation"] = safe_date(r["creation"])
+            # normalize *every* field for dates
+            for key, val in list(r.items()):
+                r[key] = safe_date(val)
 
-            # Head Imam Name & Profile Image
+            # head_imam lookup
             if r.get("head_imam"):
                 faithful = frappe.db.get_value("Imam", r["head_imam"], "faithful")
                 if faithful:
                     profile = frappe.db.get_value(
-                        "Faithful Profile",
-                        faithful,
+                        "Faithful Profile", faithful,
                         ["full_name", "profile_image"],
                         as_dict=True
                     ) or {}
-                    r["head_imam_name"] = profile.get("full_name")
+                    r["head_imam_name"]  = profile.get("full_name")
                     r["head_imam_image"] = profile.get("profile_image")
 
-            # List of Imams assigned to this mosque
+            # imams list
             imams = frappe.get_all(
                 "Imam",
                 filters={"mosque_assigned": r["name"]},
@@ -257,37 +256,28 @@ def get_all_mosques():
                 imam["imam_name"] = frappe.db.get_value("Faithful Profile", faithful, "full_name")
             r["imams"] = imams
 
-        response = {
+        return {
             "data": records,
             "status": "success",
             "code": 200,
-            "message": "Mosques retrieved successfully.",
+            "message": _("Mosques retrieved successfully."),
             "meta": {
                 "request_id": request_id,
                 "timestamp": timestamp
             }
         }
-
-        return Response(json.dumps(response), status=200, content_type="application/json")
 
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Get All Mosques Failed")
         error = {
-            "data": None,
+            "data":   None,
             "status": "error",
-            "code": 400,
-            "message": "Failed to retrieve mosques.",
-            "errors": {
-                "description": str(e)
-            },
-            "meta": {
-                "request_id": request_id,
-                "timestamp": timestamp
-            }
+            "code":   400,
+            "message":"Failed to retrieve mosques.",
+            "errors": {"description": str(e)},
+            "meta": {"request_id": request_id, "timestamp": timestamp}
         }
-
-        return Response(json.dumps(error), status=400, content_type="application/json")
-
+        return cors_response(error, status=400)
 
 @frappe.whitelist(allow_guest=True)
 def get_mosque(name):
